@@ -1,12 +1,8 @@
-//Width Of this component must be a divider of the sample rate for exmaple 44100Hz the width of this component must be at least 441 pixels
-//upsample the data you want to render by at least 2x
-//use min max for large views samples >= width*4 else juct interpolate
-
 class SubWaveViewComponent : public juce::Component {
     
 public:
     
-    SubWaveViewComponent(const VisibleRangeDataModel & vr):visibleRange(vr) {
+    SubWaveViewComponent(const VisibleRangeDataModel& vr):visibleRange(vr) {
         
         
     }
@@ -50,32 +46,6 @@ public:
         
         return std::tuple<float,float,bool> (mi,ma, ii < ia);
     }
-
-    template<typename T>
-        inline T cubicHermiteSpline(const T* buffer, T readHead, int size) noexcept
-        {
-            const auto iFloor = std::floor(readHead);
-            auto i1 = static_cast<int>(iFloor);
-            auto i0 = i1 - 1;
-            auto i2 = i1 + 1;
-            auto i3 = i1 + 2;
-            if (i3 >= size) i3 -= size;
-            if (i2 >= size) i2 -= size;
-            if (i0 < 0) i0 += size;
-
-            const auto t = readHead - iFloor;
-            const auto v0 = buffer[i0];
-            const auto v1 = buffer[i1];
-            const auto v2 = buffer[i2];
-            const auto v3 = buffer[i3];
-
-            const auto c0 = v1;
-            const auto c1 = static_cast<T>(.5) * (v2 - v0);
-            const auto c2 = v0 - static_cast<T>(2.5) * v1 + static_cast<T>(2.) * v2 - static_cast<T>(.5) * v3;
-            const auto c3 = static_cast<T>(1.5) * (v1 - v2) + static_cast<T>(.5) * (v3 - v0);
-
-            return ((c3 * t + c2) * t + c1) * t + c0;
-        }
     
     void paint(juce::Graphics &g) override {
         
@@ -85,30 +55,23 @@ public:
         
         juce::Path p2;
         
-        auto start = visibleRange.getVisibleRange().getStart();
-        auto length = visibleRange.getVisibleRange().getLength();
-        auto end = visibleRange.getVisibleRange().getEnd();
-        
-        
-        int vstart = rd.getNumSamples()*start;
-        int vlen = rd.getNumSamples()*length;
-        int vend = rd.getNumSamples()*end;
-        int inc = length*16;
-       
-        
-        double ratio =  (44100.0*length) / getWidth();
-        
+        int sampleLength = rd.getNumSamples();
+        float flength = visibleRange.getVisibleRange().getLength();
+        int vstart = visibleRange.getVisibleRange().getStart()*sampleLength;
+        int vlen = visibleRange.getVisibleRange().getLength()*sampleLength;
+        int vend = visibleRange.getVisibleRange().getEnd()*sampleLength;
+        float ratio =  (44100.0*flength) / getWidth();
         
         float sourcePos = 0.0f;
         
-        
+        int k = 0;
         
         if(ratio > 0 && ratio <= 2.0) {
             while(sourcePos < vlen-1){
                 auto pos = (int) sourcePos;
                 auto alpha = (float) sourcePos - pos;
                 auto invAlpha = 1.0f - alpha;
-                float s = cubicHermiteSpline(rd.getChannelPointer(0), sourcePos+vstart, rd.getNumSamples());//rd.getSample(0, pos+vstart) * invAlpha + rd.getSample(0, pos + vstart + 1) * alpha;
+                float s = rd.getSample(0, pos+vstart) * invAlpha + rd.getSample(0, pos + vstart + 1) * alpha;
                 float m = juce::jmap(-s,-1.0f,1.0f,0.0f, (float) getHeight());
                 if(sourcePos == 0){
                     path.startNewSubPath(sourcePos/vlen*getWidth(), m);
@@ -117,12 +80,12 @@ public:
                 }
                 
                 sourcePos += ratio;
+                k++;
             }
         }else{
             
             float sourcePos = 0;
-            int k = 0;
-            ratio/=2.0;
+            
             while(sourcePos < vlen-ratio){
                 auto pos = (int) sourcePos;
                 
@@ -171,15 +134,17 @@ public:
                 
                 
                 sourcePos += ratio;
+                
             }
                     
             
                 
             
         }
+
         
-        g.setColour(juce::Colour(209,209,209));
-        g.strokePath(path,juce::PathStrokeType(1.0f,juce::PathStrokeType::JointStyle::curved));
+        g.setColour(juce::Colour(90,150,210));
+        g.strokePath(path,juce::PathStrokeType(1.0f+M_PI/8,juce::PathStrokeType::JointStyle::curved));
         
         
     }
@@ -191,6 +156,137 @@ public:
     float minBuffer[4096];
     float maxBuffer[4096];
     float residue[4096];
+};
+
+
+class SubViewComponent : public juce::Component , public DataModel::Listener,
+public juce::AudioProcessorValueTreeState::Listener {
+public:
+    SubViewComponent(DataModel & dm, juce::AudioProcessorValueTreeState &s):
+    dataModel(dm),
+    state(s),
+    levelMseg(dataModel.getMainMSEGModel()),
+    wave(dataModel.getSubViewVisibleRange()),
+    ruler(dataModel.getSubViewVisibleRange())
+    {
+        
+        
+        addAndMakeVisible(ruler);
+        addAndMakeVisible(wave);
+        addAndMakeVisible(levelMseg);
+        renderSynth.setCurrentPlaybackSampleRate(44100.0);
+        renderSynth.addVoice(new SubVoice());
+        renderSynth.addSound(new SubSound());
+        os2x = std::make_unique<juce::dsp::Oversampling<float>>(2);
+        os2x->addOversamplingStage(juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, 0.05, -90.0, 0.05, -90.0);
+        os2x->initProcessing(44100.0*4);
+        
+        renderData.setSize(2, 4*44100.0);
+        
+        renderData.clear();
+        
+        dataModel.addListener(*this);
+        
+        
+        state.addParameterListener(Params::kSubLevel, this);
+        state.addParameterListener(Params::kSubPitchHi, this);
+        state.addParameterListener(Params::kSubPitchLow, this);
+        state.addParameterListener(Params::kSubPitchDecay, this);
+        state.addParameterListener(Params::kSubPitchVelocity, this);
+    }
     
+    ~SubViewComponent() {
+        
+    }
+    
+    void parameterChanged(const juce::String &parameterID, float newValue) override {
+
+        if(auto * subsound = static_cast<SubSound*>(renderSynth.getSound(0).get())) {
+            subsound->m = 1;
+            if(parameterID == Params::kSubLevel) {
+                subsound->setSubLevel(newValue);
+            }else if (parameterID == Params::kSubPitchHi) {
+                subsound->setSubPitchHi(newValue);
+            }else if (parameterID == Params::kSubPitchLow) {
+                subsound->setSubPitchLow(newValue);
+            }else if (parameterID == Params::kSubPitchDecay) {
+                subsound->setSubPitchDecay(newValue);
+            }else if (parameterID == Params::kSubPitchVelocity) {
+                subsound->setSubPitchVelocity(newValue);
+            }
+        }
+        juce::MessageManager::callAsync([this] {
+            this->refresh();
+        });
+    }
+    
+    void refreshSub() {
+        
+        renderData.clear();
+        
+        juce::MidiMessage n(juce::MidiMessage::noteOn(1, 48, 1.0f));
+        juce::MidiBuffer mb(n);
+        
+        mb.addEvent(juce::MidiMessage::noteOff(1, 48, 1.0f), renderData.getNumSamples()/4-1);
+        mb.addEvent(juce::MidiMessage::noteOn(1, 48, 1.0f), renderData.getNumSamples()/4);
+        mb.addEvent(juce::MidiMessage::noteOff(1, 48, 1.0f), renderData.getNumSamples()/4*2-1);
+        mb.addEvent(juce::MidiMessage::noteOn(1, 48, 1.0f), renderData.getNumSamples()/4*2);
+        mb.addEvent(juce::MidiMessage::noteOff(1, 48, 1.0f), renderData.getNumSamples()/4*3-1);
+        
+        auto sampleLength = renderData.getNumSamples();
+        
+//        auto rng = dataModel.getSubViewVisibleRange();
+//        auto fstart = rng.getVisibleRange().getStart();
+//        auto flength = rng.getVisibleRange().getLength();
+//        auto fend = rng.getVisibleRange().getEnd();
+//
+        renderSynth.renderNextBlock(renderData, mb,0, sampleLength);
+        
+    }
+    
+    
+    void refresh() {
+        refreshSub();
+        juce::dsp::AudioBlock<float> rd (renderData);
+        wave.rd = rd;
+        wave.repaint();
+    }
+    void setMainMSEGChanged(std::shared_ptr<mseg_vec> m) override {
+        if(auto * subsound = static_cast<SubSound*>(renderSynth.getSound(0).get())) {
+            subsound->mainMSEGToUse = m;
+        }
+        
+        juce::MessageManager::callAsync([this] {
+            this->refresh();
+        });
+    }
+    
+    void paint(juce::Graphics &g) override {
+        g.fillAll(juce::Colour(39,41,44));
+    }
+    
+    
+    void resized() override {
+    
+        auto b = getLocalBounds().reduced(proportionOfHeight(0.1f));
+        ruler.setBounds(b.removeFromTop(proportionOfHeight(0.1f)).withWidth(882));
+        levelMseg.setBounds(b.withWidth(882));
+        wave.setBounds(b.withWidth(882));
+        wave.toBack();
+        refresh();
+    }
+    
+    juce::Rectangle<int> viewArea;
+    DataModel dataModel;
+    juce::AudioProcessorValueTreeState & state;
+    
+    MSEGComponent levelMseg;
+    SubWaveViewComponent wave;
+    Ruler ruler;
+    juce::Synthesiser renderSynth;
+    juce::AudioBuffer<float> renderData;
+    std::unique_ptr<juce::dsp::Oversampling<float>> os2x;
+
+
     
 };
