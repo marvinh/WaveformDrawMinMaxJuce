@@ -9,4 +9,4 @@ interpolate your data to 50.24 khz with linear interpolation before drawing.
 min max order interpolated data 
 set ratio = (sampleRate*length) / getWidth();
 length is length of the samples 50 seconds or what you have
-[![voice render wave demo](https://img.youtube.com/vi/fmK6tGakLWA/4.jpg)](https://youtu.be/fmK6tGakLWA)
+[![voice render wave demo](https://img.youtube.com/vi/fmK6tGakLWA/1.jpg)](https://youtu.be/fmK6tGakLWA)
